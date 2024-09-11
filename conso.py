@@ -63,7 +63,7 @@ def change_password(email, old_password, new_password):
         st.error("Invalid email or old password.")
 
 # Consolidation logic for combining CSV/Excel files or specific sheets
-def consolidate_files(file_list, file_type, selected_sheets=None):
+def consolidate_files(file_list, file_type):
     consolidated_data = pd.DataFrame()
 
     for uploaded_file in file_list:
@@ -71,18 +71,29 @@ def consolidate_files(file_list, file_type, selected_sheets=None):
             if file_type == 'csv':
                 df = pd.read_csv(uploaded_file)
                 df['Filename'] = uploaded_file.name  # Add filename column
+                consolidated_data = pd.concat([consolidated_data, df], ignore_index=True)
             elif file_type == 'excel':
-                if selected_sheets and uploaded_file.name in selected_sheets:
-                    # Consolidate only selected sheets
-                    for sheet in selected_sheets[uploaded_file.name]:
-                        sheet_df = pd.read_excel(uploaded_file, sheet_name=sheet)
-                        sheet_df['Filename'] = uploaded_file.name  # Add filename column
-                        sheet_df['Sheet Name'] = sheet  # Add sheet name column
-                        consolidated_data = pd.concat([consolidated_data, sheet_df], ignore_index=True)
-                else:
-                    # Consolidate all sheets in the file
-                    sheet_df = pd.read_excel(uploaded_file)
-                    sheet_df['Filename'] = uploaded_file.name
+                df = pd.read_excel(uploaded_file, engine='openpyxl')
+                df['Filename'] = uploaded_file.name  # Add filename column
+                consolidated_data = pd.concat([consolidated_data, df], ignore_index=True)
+        except ValueError as e:
+            st.error(f"Error processing {uploaded_file.name}: {e}")
+        except Exception as e:
+            st.error(f"Unexpected error with file {uploaded_file.name}: {e}")
+
+    return consolidated_data
+
+# Consolidation logic for sheets
+def consolidate_sheets(file_list, selected_sheets):
+    consolidated_data = pd.DataFrame()
+
+    for uploaded_file in file_list:
+        try:
+            if uploaded_file.name in selected_sheets:
+                for sheet in selected_sheets[uploaded_file.name]:
+                    sheet_df = pd.read_excel(uploaded_file, sheet_name=sheet)
+                    sheet_df['Filename'] = uploaded_file.name  # Add filename column
+                    sheet_df['Sheet Name'] = sheet  # Add sheet name column
                     consolidated_data = pd.concat([consolidated_data, sheet_df], ignore_index=True)
         except ValueError as e:
             st.error(f"Error processing sheet in {uploaded_file.name}: {e}")
@@ -136,22 +147,37 @@ if authenticate_user(email, password):
     # Display total number of uploaded files
     if uploaded_files:
         st.write(f"Total uploaded files: {len(uploaded_files)}")
-        
-        # Cache ExcelFile objects for re-use
-        excel_files = {file.name: pd.ExcelFile(file) for file in uploaded_files}
 
-        selected_files = [file for file in uploaded_files]
-        selected_sheets = st.session_state.selected_sheets  # Maintain state of selected sheets across reruns
+        # 4. File Consolidation
+        if consolidation_type == "Consolidate data from files":
+            consolidated_data = consolidate_files(uploaded_files, file_type)
 
-        # 4. Sheet Selection for Sheet Consolidation
-        if consolidation_type == "Consolidate data from sheets" and file_type == 'excel':
+            if not consolidated_data.empty:
+                # Display consolidated data
+                st.write("Consolidated Data from Files:")
+                st.dataframe(consolidated_data)
+
+                # Allow the user to name the consolidated output file
+                output_file_name = st.text_input("Enter name for the consolidated output file (without extension)", value="consolidated")
+
+                # Option to download consolidated file
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    consolidated_data.to_excel(writer, index=False)
+                st.download_button(label="Download Consolidated File", data=output.getvalue(), file_name=f"{output_file_name}.xlsx")
+            else:
+                st.warning("No data to display after consolidation.")
+
+        # 5. Sheet Selection for Sheet Consolidation
+        elif consolidation_type == "Consolidate data from sheets" and file_type == 'excel':
+            selected_sheets = st.session_state.selected_sheets  # Maintain state of selected sheets across reruns
             search_term = st.text_input("Search for sheets (optional)")
 
             # List to store all matching sheets across all files for the search term
             global_matching_sheets = []
 
             for file in uploaded_files:
-                sheet_names = excel_files[file.name].sheet_names  # Use cached ExcelFile
+                sheet_names = pd.ExcelFile(file).sheet_names  # Load sheet names
 
                 # Show manual sheet selection for each file
                 selected_sheets[file.name] = st.multiselect(f"Select sheets in {file.name} manually:", options=sheet_names, default=selected_sheets.get(file.name, []))
@@ -163,32 +189,21 @@ if authenticate_user(email, password):
                 for sheet in filtered_sheets:
                     global_matching_sheets.append((file.name, sheet))
 
-            # Show checkboxes for all matching sheets
+            # Automatically select and consolidate sheets matching the search term
             if search_term and global_matching_sheets:
-                st.write(f"Sheets matching '{search_term}' across all files:")
+                st.write(f"Automatically consolidating sheets matching '{search_term}' across all files:")
                 for filename, sheet_name in global_matching_sheets:
-                    sheet_key = f"{filename} - {sheet_name}"
-                    # Create a checkbox for each sheet (default to True if it was previously selected)
-                    if sheet_key not in selected_sheets:
-                        selected_sheets[sheet_key] = st.checkbox(f"{filename} - {sheet_name}", value=True)
-                    else:
-                        selected_sheets[sheet_key] = st.checkbox(f"{filename} - {sheet_name}", value=selected_sheets[sheet_key])
+                    if filename not in selected_sheets:
+                        selected_sheets[filename] = []
+                    selected_sheets[filename].append(sheet_name)
 
-            # Map the selected sheets back to their respective files for consolidation
-            mapped_sheets = {}
-            for sheet_key, selected in selected_sheets.items():
-                if selected and " - " in sheet_key:  # Ensure this is a filename-sheet pair from search
-                    filename, sheet_name = sheet_key.split(" - ")
-                    if filename not in mapped_sheets:
-                        mapped_sheets[filename] = []
-                    mapped_sheets[filename].append(sheet_name)
-
-            # Consolidate the files or selected sheets
-            consolidated_data = consolidate_files(selected_files, file_type, mapped_sheets)
+            # Consolidate the selected sheets
+            mapped_sheets = {file.name: selected_sheets[file.name] for file in uploaded_files if selected_sheets.get(file.name)}
+            consolidated_data = consolidate_sheets(uploaded_files, mapped_sheets)
 
             if not consolidated_data.empty:
                 # Display consolidated data
-                st.write("Consolidated Data:")
+                st.write("Consolidated Data from Sheets:")
                 st.dataframe(consolidated_data)
 
                 # Allow the user to name the consolidated output file
